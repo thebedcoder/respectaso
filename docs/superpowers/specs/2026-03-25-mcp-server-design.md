@@ -162,6 +162,44 @@ No authentication for the initial implementation — consistent with the rest of
 
 ---
 
+## Documentation
+
+A `docs/mcp.md` file is produced as part of the implementation. It is the primary reference for anyone integrating the MCP server into another project.
+
+### Contents of `docs/mcp.md`
+
+**1. Prerequisites & startup order**
+- Confirm RespectASO is running (`docker compose up -d`) before starting the consuming project
+- The `respectaso_net` Docker network is created automatically on first `docker compose up`
+
+**2. Connecting the consuming project**
+- The compose snippet to join `respectaso_net` (from the Docker Networking section above)
+- The MCP endpoint URL: `http://respectaso-web:8080/mcp/`
+- A note that the host machine can also reach it at `http://localhost/mcp/`
+
+**3. Integration examples**
+- **Claude SDK (Python)** — how to pass the MCP server URL when creating an `anthropic.Anthropic` client with MCP tool use
+- **OpenAI SDK (Python)** — how to include the MCP server as a tool source in a `client.chat.completions.create()` call
+- Both examples should show a minimal end-to-end call (e.g., `search_keywords` for "fitness tracker" in the US)
+
+**4. Tool reference**
+One section per tool with:
+- Description (one sentence)
+- Input parameters (name, type, required/optional, constraints)
+- Example call (JSON)
+- Example response (JSON, truncated where large)
+- Notes (rate limiting, runtime, edge cases)
+
+**5. Error reference**
+Table of all error strings an LLM caller may receive and what they mean.
+
+**6. Limitations**
+- Rate limiting: 2s between iTunes API calls
+- SQLite is single-writer — avoid concurrent tool calls that trigger searches
+- No authentication (local use only)
+
+---
+
 ## Out of Scope
 
 - ASGI server migration (Gunicorn sync workers are sufficient)
