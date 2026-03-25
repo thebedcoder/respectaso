@@ -47,6 +47,110 @@ services:
 
 ---
 
+## Adding to AI Clients
+
+RespectASO must be running (`docker compose up -d`) before connecting any client.
+All clients use the same endpoint: `http://localhost/mcp`
+
+---
+
+### Claude Code (CLI)
+
+```bash
+claude mcp add --transport http respectaso http://localhost/mcp
+```
+
+Verify it was added:
+
+```bash
+claude mcp list
+```
+
+Once added, Claude Code can call RespectASO tools directly in any conversation within
+that project. To make it available globally (all projects):
+
+```bash
+claude mcp add --transport http --scope user respectaso http://localhost/mcp
+```
+
+---
+
+### Claude Desktop
+
+Claude Desktop only supports `stdio` transport. Use `mcp-remote` as a bridge to the
+HTTP endpoint (requires Node.js / npx).
+
+Edit `~/Library/Application Support/Claude/claude_desktop_config.json` (macOS) or
+`%APPDATA%\Claude\claude_desktop_config.json` (Windows):
+
+```json
+{
+  "mcpServers": {
+    "respectaso": {
+      "command": "npx",
+      "args": ["mcp-remote", "http://localhost/mcp"]
+    }
+  }
+}
+```
+
+Restart Claude Desktop. The RespectASO tools will appear in the tools panel.
+
+---
+
+### Cursor
+
+Create or edit `.cursor/mcp.json` in your project root (project-scoped) or
+`~/.cursor/mcp.json` (global):
+
+```json
+{
+  "mcpServers": {
+    "respectaso": {
+      "url": "http://localhost/mcp"
+    }
+  }
+}
+```
+
+Restart Cursor or reload the window. The tools will be available to the Cursor Agent.
+
+---
+
+### VS Code (GitHub Copilot / Continue)
+
+**GitHub Copilot (VS Code ≥ 1.99):** Create `.vscode/mcp.json` in your workspace:
+
+```json
+{
+  "servers": {
+    "respectaso": {
+      "type": "http",
+      "url": "http://localhost/mcp"
+    }
+  }
+}
+```
+
+**Continue extension:** Add to your `~/.continue/config.json`:
+
+```json
+{
+  "experimental": {
+    "modelContextProtocolServers": [
+      {
+        "transport": {
+          "type": "http",
+          "url": "http://localhost/mcp"
+        }
+      }
+    ]
+  }
+}
+```
+
+---
+
 ## Integration Examples
 
 ### Claude SDK (Python)
