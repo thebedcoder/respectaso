@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from mcp.server.fastmcp import FastMCP
 from .forms import COUNTRY_CHOICES  # module-level — required for test patching
+from .services import ITunesSearchService  # module-level — required for test patching
 
 mcp = FastMCP("RespectASO")
 
@@ -205,3 +206,313 @@ def get_search_history(
         "total_pages": total_pages,
         "total_count": total_count,
     }
+
+
+# ---------------------------------------------------------------------------
+# Search Tools
+# ---------------------------------------------------------------------------
+
+@mcp.tool()
+def search_keywords(
+    keywords: str,
+    countries: list[str] | None = None,
+    app_id: int | None = None,
+) -> dict:
+    """
+    Search 1–20 keywords across 1–5 countries (comma-separated keywords string).
+
+    Triggers iTunes API calls. Rate-limited at 2s per call.
+    Worst case: 20 keywords × 5 countries ≈ 3 minutes. Connection stays open.
+    Returns results grouped by country plus an opportunity ranking for multi-country searches.
+    """
+    import time
+    from django.utils import timezone
+    from .models import App, Keyword, SearchResult
+    from .services import DifficultyCalculator, PopularityEstimator, DownloadEstimator
+
+    if countries is None:
+        countries = ["us"]
+    countries = countries[:5]
+
+    kw_list = [k.strip() for k in keywords.split(",") if k.strip()][:20]
+    if not kw_list:
+        return {"error": "No keywords provided"}
+
+    app = None
+    if app_id:
+        try:
+            app = App.objects.get(id=app_id)
+        except App.DoesNotExist:
+            return {"error": f"App {app_id} not found"}
+
+    itunes = ITunesSearchService()
+    diff_calc = DifficultyCalculator()
+    pop_est = PopularityEstimator()
+    dl_est = DownloadEstimator()
+
+    results_by_country: dict = {}
+    skipped: list[str] = []
+    call_count = 0
+
+    for country in countries:
+        country_results = []
+        for kw_text in kw_list:
+            kw_obj, created = Keyword.objects.get_or_create(
+                keyword=kw_text.lower(), app=app
+            )
+            today_start = timezone.now().replace(hour=0, minute=0, second=0, microsecond=0)
+            if not created and kw_obj.results.filter(
+                country=country, searched_at__gte=today_start
+            ).exists():
+                skipped.append(f"{kw_text} ({country.upper()})")
+                continue
+
+            if call_count > 0:
+                time.sleep(2)
+            call_count += 1
+
+            competitors = itunes.search_apps(kw_text, country=country, limit=25)
+            difficulty_score, breakdown = diff_calc.calculate(competitors, keyword=kw_text)
+
+            app_rank = None
+            if app and app.track_id:
+                app_rank = itunes.find_app_rank(kw_text, app.track_id, country=country)
+
+            popularity = pop_est.estimate(competitors, kw_text)
+            dl_estimates = dl_est.estimate(popularity or 0, country=country)
+            breakdown["download_estimates"] = dl_estimates
+
+            sr = SearchResult.upsert_today(
+                keyword=kw_obj,
+                popularity_score=popularity,
+                difficulty_score=difficulty_score,
+                difficulty_breakdown=breakdown,
+                competitors_data=competitors,
+                app_rank=app_rank,
+                country=country,
+            )
+            _, advice_label, _, advice_desc = sr.targeting_advice
+            country_results.append({
+                "keyword": kw_text,
+                "country": country,
+                "popularity_score": popularity,
+                "difficulty_score": difficulty_score,
+                "difficulty_label": sr.difficulty_label,
+                "targeting_advice": {"label": advice_label, "description": advice_desc},
+                "app_rank": app_rank,
+                "result_id": sr.id,
+            })
+        results_by_country[country] = country_results
+
+    # Opportunity ranking for multi-country
+    opportunity_ranking: list[dict] = []
+    if len(countries) > 1:
+        kw_map: dict = {}
+        for country, cresults in results_by_country.items():
+            for r in cresults:
+                kw = r["keyword"]
+                if kw not in kw_map:
+                    kw_map[kw] = {}
+                pop = r["popularity_score"] or 0
+                diff = r["difficulty_score"]
+                kw_map[kw][country] = {
+                    "popularity": pop,
+                    "difficulty": diff,
+                    "opportunity": round(pop * (100 - diff) / 100),
+                }
+        for kw, country_data in kw_map.items():
+            best = max(country_data, key=lambda c: country_data[c]["opportunity"])
+            opportunity_ranking.append({
+                "keyword": kw,
+                "countries": country_data,
+                "best_country": best,
+                "best_score": country_data[best]["opportunity"],
+            })
+        opportunity_ranking.sort(key=lambda x: x["best_score"], reverse=True)
+
+    response: dict = {"results_by_country": results_by_country, "opportunity_ranking": opportunity_ranking}
+    if skipped:
+        response["skipped"] = skipped
+    return response
+
+
+@mcp.tool()
+def opportunity_search(keyword: str, app_id: int | None = None) -> dict:
+    """
+    Search a single keyword across all 30 countries.
+
+    Returns a ranked list of countries by opportunity score.
+    Runtime: ~60 seconds (30 iTunes calls at 2s each). Connection stays open.
+    """
+    import time
+    from .models import App
+    # COUNTRY_CHOICES is imported at module level for test patchability
+    from .services import DifficultyCalculator, PopularityEstimator, DownloadEstimator
+
+    kw_text = keyword.strip().lower()
+    if not kw_text:
+        return {"error": "No keyword provided"}
+
+    app = None
+    if app_id:
+        try:
+            app = App.objects.get(id=app_id)
+        except App.DoesNotExist:
+            return {"error": f"App {app_id} not found"}
+
+    itunes = ITunesSearchService()
+    diff_calc = DifficultyCalculator()
+    pop_est = PopularityEstimator()
+    dl_est = DownloadEstimator()
+
+    results = []
+    for i, (country_code, _country_name) in enumerate(COUNTRY_CHOICES):
+        if i > 0:
+            time.sleep(2)
+
+        competitors = itunes.search_apps(kw_text, country=country_code, limit=25)
+        difficulty_score, breakdown = diff_calc.calculate(competitors, keyword=kw_text)
+        popularity = pop_est.estimate(competitors, kw_text)
+        dl_estimates = dl_est.estimate(popularity or 0, country=country_code)
+        breakdown["download_estimates"] = dl_estimates
+
+        app_rank = None
+        if app and app.track_id:
+            app_rank = itunes.find_app_rank(kw_text, app.track_id, country=country_code)
+
+        opportunity = round(popularity * (100 - difficulty_score) / 100) if popularity else 0
+        results.append({
+            "country": country_code,
+            "popularity": popularity,
+            "difficulty": difficulty_score,
+            "difficulty_label": (
+                "Very Easy" if difficulty_score <= 15
+                else "Easy" if difficulty_score <= 35
+                else "Moderate" if difficulty_score <= 55
+                else "Hard" if difficulty_score <= 75
+                else "Very Hard" if difficulty_score <= 90
+                else "Extreme"
+            ),
+            "opportunity": opportunity,
+            "app_rank": app_rank,
+            "competitor_count": len(competitors),
+        })
+
+    results.sort(key=lambda x: x["opportunity"], reverse=True)
+    return {"keyword": kw_text, "results": results, "total_countries": len(results)}
+
+
+@mcp.tool()
+def refresh_keyword(keyword_id: int, country: str = "us") -> dict:
+    """Re-run scoring for a single keyword+country combination."""
+    import time
+    from .models import Keyword, SearchResult
+    from .services import DifficultyCalculator, PopularityEstimator, DownloadEstimator
+
+    try:
+        kw = Keyword.objects.select_related("app").get(id=keyword_id)
+    except Keyword.DoesNotExist:
+        return {"error": f"Keyword {keyword_id} not found"}
+
+    itunes = ITunesSearchService()
+    diff_calc = DifficultyCalculator()
+    pop_est = PopularityEstimator()
+    dl_est = DownloadEstimator()
+
+    competitors = itunes.search_apps(kw.keyword, country=country, limit=25)
+    difficulty_score, breakdown = diff_calc.calculate(competitors, keyword=kw.keyword)
+
+    app_rank = None
+    if kw.app and kw.app.track_id:
+        app_rank = itunes.find_app_rank(kw.keyword, kw.app.track_id, country=country)
+
+    popularity = pop_est.estimate(competitors, kw.keyword)
+    dl_estimates = dl_est.estimate(popularity or 0, country=country)
+    breakdown["download_estimates"] = dl_estimates
+
+    sr = SearchResult.upsert_today(
+        keyword=kw,
+        popularity_score=popularity,
+        difficulty_score=difficulty_score,
+        difficulty_breakdown=breakdown,
+        competitors_data=competitors,
+        app_rank=app_rank,
+        country=country,
+    )
+
+    return {
+        "success": True,
+        "result": {
+            "keyword": kw.keyword,
+            "keyword_id": kw.id,
+            "result_id": sr.id,
+            "popularity_score": popularity,
+            "difficulty_score": difficulty_score,
+            "difficulty_label": sr.difficulty_label,
+            "country": country,
+            "searched_at": sr.searched_at.isoformat(),
+            "app_rank": app_rank,
+        },
+    }
+
+
+@mcp.tool()
+def bulk_refresh_keywords(app_id: int | None = None, country: str = "us") -> dict:
+    """
+    Re-run scoring for all keywords under an app.
+
+    If app_id is omitted, refreshes only keywords with no associated app.
+    To refresh across all apps, call once per app.
+    """
+    import time
+    from .models import Keyword, SearchResult
+    from .services import DifficultyCalculator, PopularityEstimator, DownloadEstimator
+
+    if app_id is not None:
+        keywords = Keyword.objects.filter(app_id=app_id).select_related("app")
+    else:
+        keywords = Keyword.objects.filter(app__isnull=True)
+
+    if not keywords.exists():
+        return {"success": True, "results": [], "refreshed": 0}
+
+    itunes = ITunesSearchService()
+    diff_calc = DifficultyCalculator()
+    pop_est = PopularityEstimator()
+    dl_est = DownloadEstimator()
+
+    results = []
+    for i, kw in enumerate(keywords):
+        if i > 0:
+            time.sleep(2)
+
+        competitors = itunes.search_apps(kw.keyword, country=country, limit=25)
+        difficulty_score, breakdown = diff_calc.calculate(competitors, keyword=kw.keyword)
+
+        app_rank = None
+        if kw.app and kw.app.track_id:
+            app_rank = itunes.find_app_rank(kw.keyword, kw.app.track_id, country=country)
+
+        popularity = pop_est.estimate(competitors, kw.keyword)
+        dl_estimates = dl_est.estimate(popularity or 0, country=country)
+        breakdown["download_estimates"] = dl_estimates
+
+        sr = SearchResult.upsert_today(
+            keyword=kw,
+            popularity_score=popularity,
+            difficulty_score=difficulty_score,
+            difficulty_breakdown=breakdown,
+            competitors_data=competitors,
+            app_rank=app_rank,
+            country=country,
+        )
+        results.append({
+            "keyword": kw.keyword,
+            "keyword_id": kw.id,
+            "result_id": sr.id,
+            "popularity_score": popularity,
+            "difficulty_score": difficulty_score,
+            "country": country,
+        })
+
+    return {"success": True, "results": results, "refreshed": len(results)}
