@@ -1,10 +1,35 @@
 from __future__ import annotations
 
+from functools import wraps
+
+from asgiref.sync import sync_to_async
 from mcp.server.fastmcp import FastMCP
+from mcp.server.transport_security import TransportSecuritySettings
 from .forms import COUNTRY_CHOICES  # module-level — required for test patching
 from .services import ITunesSearchService  # module-level — required for test patching
 
-mcp = FastMCP("RespectASO")
+# stateless_http=True: each request is independent (no session negotiation required).
+# Disable DNS rebinding protection — local-only tool on a trusted Docker network.
+mcp = FastMCP(
+    "RespectASO",
+    stateless_http=True,
+    transport_security=TransportSecuritySettings(enable_dns_rebinding_protection=False),
+)
+
+
+def tool(fn):
+    """Register a sync function as an MCP tool, running it in a thread pool.
+
+    FastMCP calls sync tools directly in the async event loop. Django ORM cannot
+    be called from an async context without sync_to_async. This decorator registers
+    an async wrapper in MCP's tool registry but returns the original sync function
+    so tests can call it directly without async overhead.
+    """
+    @mcp.tool()
+    @wraps(fn)
+    async def wrapper(*args, **kwargs):
+        return await sync_to_async(fn)(*args, **kwargs)
+    return fn  # Tests and direct callers get the original sync function
 
 
 def _difficulty_label(score: int) -> str:
@@ -25,7 +50,7 @@ def _difficulty_label(score: int) -> str:
 # Read Tools
 # ---------------------------------------------------------------------------
 
-@mcp.tool()
+@tool
 def list_apps() -> list[dict]:
     """List all tracked iOS apps."""
     from .models import App
@@ -43,7 +68,7 @@ def list_apps() -> list[dict]:
     ]
 
 
-@mcp.tool()
+@tool
 def list_keywords(app_id: int | None = None) -> list[dict]:
     """
     List tracked keywords with their latest score per country.
@@ -94,7 +119,7 @@ def list_keywords(app_id: int | None = None) -> list[dict]:
     ]
 
 
-@mcp.tool()
+@tool
 def get_keyword_scores(keyword_id: int, country: str | None = None) -> dict:
     """
     Get the latest scores for a keyword.
@@ -131,7 +156,7 @@ def get_keyword_scores(keyword_id: int, country: str | None = None) -> dict:
     }
 
 
-@mcp.tool()
+@tool
 def get_keyword_trend(keyword_id: int, country: str | None = None) -> list[dict]:
     """
     Get historical trend data for a keyword.
@@ -161,7 +186,7 @@ def get_keyword_trend(keyword_id: int, country: str | None = None) -> list[dict]
     ]
 
 
-@mcp.tool()
+@tool
 def get_search_history(
     app_id: int | None = None,
     country: str | None = None,
@@ -226,7 +251,7 @@ def get_search_history(
 # Search Tools
 # ---------------------------------------------------------------------------
 
-@mcp.tool()
+@tool
 def search_keywords(
     keywords: str,
     countries: list[str] | None = None,
@@ -354,7 +379,7 @@ def search_keywords(
     return response
 
 
-@mcp.tool()
+@tool
 def opportunity_search(keyword: str, app_id: int | None = None) -> dict:
     """
     Search a single keyword across all 30 countries.
@@ -413,7 +438,7 @@ def opportunity_search(keyword: str, app_id: int | None = None) -> dict:
     return {"keyword": kw_text, "results": results, "total_countries": len(results)}
 
 
-@mcp.tool()
+@tool
 def refresh_keyword(keyword_id: int, country: str = "us") -> dict:
     """Re-run scoring for a single keyword+country combination."""
     import time
@@ -467,7 +492,7 @@ def refresh_keyword(keyword_id: int, country: str = "us") -> dict:
     }
 
 
-@mcp.tool()
+@tool
 def bulk_refresh_keywords(app_id: int | None = None, country: str = "us") -> dict:
     """
     Re-run scoring for all keywords under an app.
@@ -533,7 +558,7 @@ def bulk_refresh_keywords(app_id: int | None = None, country: str = "us") -> dic
 # Management Tools
 # ---------------------------------------------------------------------------
 
-@mcp.tool()
+@tool
 def add_app(
     name: str,
     bundle_id: str = "",
@@ -559,7 +584,7 @@ def add_app(
     return {"id": app.id, "name": app.name}
 
 
-@mcp.tool()
+@tool
 def delete_keyword(keyword_id: int) -> dict:
     """Delete a keyword and all its search results."""
     from .models import Keyword
@@ -574,7 +599,7 @@ def delete_keyword(keyword_id: int) -> dict:
     return {"success": True, "deleted": name}
 
 
-@mcp.tool()
+@tool
 def delete_app(app_id: int) -> dict:
     """Delete an app. Keywords linked to this app are preserved (their app field is set to null)."""
     from .models import App
