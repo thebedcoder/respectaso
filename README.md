@@ -1,12 +1,16 @@
 # RespectASO
 
+<p align="center">
+  <img src="desktop/assets/RespectASO.iconset/icon_256x256.png" alt="RespectASO" width="128">
+</p>
+
 [![License: AGPL-3.0](https://img.shields.io/badge/License-AGPL--3.0-blue.svg)](LICENSE)
-[![Docker](https://img.shields.io/badge/Docker-Ready-2496ED?logo=docker&logoColor=white)](docker-compose.yml)
+[![macOS](https://img.shields.io/badge/macOS-Download_.dmg-purple?logo=apple&logoColor=white)](https://github.com/respectlytics/respectaso/releases/latest)
 [![Version](https://img.shields.io/github/v/release/respectlytics/respectaso?color=purple&label=version)](https://github.com/respectlytics/respectaso/releases/latest)
 
-**Free, open-source ASO keyword research tool — self-hosted via Docker. No API keys. No accounts. No data leaves your machine.**
+**Free, open-source ASO keyword research tool for macOS. No API keys. No accounts. No data leaves your machine.**
 
-RespectASO helps iOS developers research App Store keywords privately. Run it locally with a single Docker command and get keyword popularity scores, difficulty analysis, competitor breakdowns, and download estimates — all without sending your research data to third-party services.
+RespectASO helps iOS developers research App Store keywords privately. Download the `.dmg`, drag to Applications, and get keyword popularity scores, difficulty analysis, competitor breakdowns, and download estimates — all without sending your research data to third-party services.
 
 ---
 
@@ -18,7 +22,7 @@ Most ASO tools require paid subscriptions, API keys, and send your keyword resea
 - **Runs entirely on your machine** — all API calls originate from your local network
 - **No telemetry, no analytics, no tracking** — zero data sent to any third party
 - **Free and open-source** — AGPL-3.0 licensed, forever
-- **Single Docker command** — up and running in 30 seconds
+- **Native Mac app** — download the `.dmg`, drag to Applications, done
 
 ## Features
 
@@ -39,11 +43,44 @@ Most ASO tools require paid subscriptions, API keys, and send your keyword resea
 
 ## Quick Start
 
-### Prerequisites
+### 1. Download
+
+**→ [Download RespectASO.dmg](https://github.com/respectlytics/respectaso/releases/latest)** (macOS 12+)
+
+### 2. Install
+
+Open the `.dmg` and drag **RespectASO** into your **Applications** folder.
+
+### 3. Launch
+
+Open RespectASO from Applications (or Spotlight: ⌘ Space → "RespectASO"). The app window opens automatically — type a keyword, select a country, and click Search.
+
+> **First launch:** If macOS shows a security dialog, right-click the app → Open → Open. This is only needed once — the app is code-signed and notarized by Apple.
+
+### Updating
+
+When an update is available, a banner appears on the Dashboard with release notes and a **Download Update** button. Download the new `.dmg`, drag to Applications (replace the old version), and relaunch. Your data is preserved — it lives in `~/Library/Application Support/RespectASO/`, separate from the app bundle.
+
+### Data Location
+
+Your keywords, search history, and settings are stored at:
+
+```
+~/Library/Application Support/RespectASO/
+```
+
+This data survives app updates and deletions. Delete this folder only if you want a completely fresh start.
+
+<details>
+<summary><strong>🐳 Docker (legacy)</strong></summary>
+
+Docker was the original distribution method. While still supported, we recommend switching to the native Mac app for a simpler experience.
+
+#### Prerequisites
 
 - [Docker](https://docs.docker.com/get-docker/) installed and running
 
-### 1. Clone and run
+#### Install via Docker
 
 ```bash
 git clone https://github.com/respectlytics/respectaso.git
@@ -51,19 +88,34 @@ cd respectaso
 docker compose up -d
 ```
 
-### 2. Open in your browser
+Open **[http://localhost](http://localhost)** in your browser.
 
-**→ [http://localhost](http://localhost)**
+#### Updating (Docker)
 
-That's it. The first startup takes a few seconds (database migration + static files).
+```bash
+cd respectaso
+git pull
+docker compose down
+docker compose build --no-cache
+docker compose up -d
+```
 
-On first launch, the tool automatically:
-- Generates a secure Django secret key
-- Runs database migrations
-- Collects static files
-- Starts the Gunicorn server
+#### Migrating from Docker to Native App
 
-You'll see the RespectASO dashboard ready to search. Type a keyword, select a country, and click Search.
+Your existing data carries over. Run this one-time migration:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/respectlytics/respectaso/main/desktop/migrate-from-docker.sh | bash
+```
+
+Then install the native app and verify your data is intact. Once confirmed:
+
+```bash
+docker compose down     # Stop the container
+docker compose down -v  # Also remove the volume (only after confirming native app works)
+```
+
+</details>
 
 ## How Scoring Works
 
@@ -112,72 +164,36 @@ For more details, visit the **Methodology** page inside the app.
 
 ## Configuration
 
-### Changing the Port
+<details>
+<summary><strong>Custom Local Domain (Docker only)</strong></summary>
 
-The default `docker-compose.yml` maps port **80** on your host to port 8080 in the container. If port 80 is already in use:
+If running via Docker, you can use a cleaner URL. Add this to your `/etc/hosts` file:
 
-```yaml
-ports:
-  - "9090:8080"  # Access at http://localhost:9090
-```
-
-### Custom Local Domain
-
-For a cleaner URL, add this to your `/etc/hosts` file:
-
-**macOS / Linux:**
 ```bash
 sudo sh -c 'echo "127.0.0.1  respectaso.private" >> /etc/hosts'
-```
-
-**Windows (run as Administrator):**
-```
-echo 127.0.0.1  respectaso.private >> C:\Windows\System32\drivers\etc\hosts
 ```
 
 Then access the tool at **[http://respectaso.private](http://respectaso.private)**
 
 The `.private` TLD is reserved by [RFC 6762](https://www.rfc-editor.org/rfc/rfc6762) and avoids conflicts with macOS mDNS resolution (unlike `.local`).
 
-### Data Persistence
-
-Your data is stored in a Docker volume (`aso_data`). Your database and secret key survive container restarts and rebuilds.
-
-To back up your data:
-```bash
-docker cp respectaso-web-1:/app/data ./backup
-```
-
-### Updating to a New Version
-
-```bash
-cd respectaso
-git pull
-docker compose down
-docker compose build --no-cache
-docker compose up -d
-```
-
-Your data is preserved — only the application code is updated.
-
-### Automatic Startup
-
-The `docker-compose.yml` includes `restart: unless-stopped`, so the tool automatically restarts when Docker starts. No need to run `docker compose up` again after a reboot.
+</details>
 
 ## Tech Stack
 
 - **Python 3.12** + **Django 5.1**
+- **pywebview** — native macOS WebKit window
 - **SQLite** — local single-user database
-- **Gunicorn** — production WSGI server
+- **wsgiref** — built-in Python WSGI server
 - **WhiteNoise** — efficient static file serving
 - **Tailwind CSS** (CDN) — dark theme UI
-- **Docker** — single-command deployment
+- **PyInstaller** — macOS `.app` bundle
 
 ## Privacy
 
 RespectASO is designed with privacy as a core principle:
 
-- **100% local** — the tool runs entirely on your machine inside Docker
+- **100% local** — the tool runs entirely on your machine as a native app
 - **No accounts** — no registration, no login, no user tracking
 - **No telemetry** — zero analytics, zero phone-home, zero data collection
 - **No API keys** — uses only the public iTunes Search API (no credentials required)

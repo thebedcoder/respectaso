@@ -1,4 +1,5 @@
 import os
+import sys
 from pathlib import Path
 
 from dotenv import load_dotenv
@@ -6,9 +7,12 @@ from dotenv import load_dotenv
 BASE_DIR = Path(__file__).resolve().parent.parent
 
 # Current version — update on each release
-VERSION = "1.5.1"
+VERSION = "2.2.1"
 
-# Load .env from persistent data volume (auto-generated SECRET_KEY lives there)
+# Native macOS app vs Docker detection
+IS_NATIVE_APP = os.environ.get("RESPECTASO_NATIVE") == "1" or getattr(sys, "frozen", False)
+
+# Data directory: ~/Library/Application Support/RespectASO/ (native) or ./data (Docker)
 DATA_DIR = Path(os.environ.get("DATA_DIR", BASE_DIR / "data"))
 DATA_DIR.mkdir(parents=True, exist_ok=True)
 
@@ -90,7 +94,7 @@ STATIC_URL = "static/"
 STATICFILES_DIRS = [BASE_DIR / "static"]
 STATIC_ROOT = BASE_DIR / "staticfiles"
 
-# CSRF trusted origins for local Docker access
+# CSRF trusted origins for local access
 CSRF_TRUSTED_ORIGINS = [
     "http://localhost",
     "http://127.0.0.1",
@@ -99,3 +103,41 @@ CSRF_TRUSTED_ORIGINS = [
     "http://127.0.0.1:9090",
     "http://respectaso.private:9090",
 ]
+
+# Native app: allow any localhost port (Gunicorn binds to a random port)
+if IS_NATIVE_APP:
+    import re
+    # Add a wildcard-like set of common ports for CSRF trust
+    for p in range(8000, 8100):
+        CSRF_TRUSTED_ORIGINS.append(f"http://127.0.0.1:{p}")
+        CSRF_TRUSTED_ORIGINS.append(f"http://localhost:{p}")
+
+# Logging — write to a file in the data directory for the native app
+if IS_NATIVE_APP:
+    _log_file = DATA_DIR / "respectaso.log"
+    LOGGING = {
+        "version": 1,
+        "disable_existing_loggers": False,
+        "formatters": {
+            "simple": {
+                "format": "%(asctime)s %(levelname)s %(name)s: %(message)s",
+                "datefmt": "%Y-%m-%d %H:%M:%S",
+            },
+        },
+        "handlers": {
+            "file": {
+                "level": "WARNING",
+                "class": "logging.handlers.RotatingFileHandler",
+                "filename": str(_log_file),
+                "maxBytes": 1_048_576,  # 1 MB
+                "backupCount": 1,
+                "formatter": "simple",
+            },
+        },
+        "loggers": {
+            "aso": {
+                "handlers": ["file"],
+                "level": "WARNING",
+            },
+        },
+    }

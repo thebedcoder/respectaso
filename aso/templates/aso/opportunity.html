@@ -39,7 +39,7 @@
                     </button>
                 </div>
             </div>
-            <p class="text-slate-500 text-xs mt-2">Searches all 30 countries sequentially. Takes about 60–90 seconds. Please stay on this page while it runs.</p>
+            <p class="text-slate-500 text-xs mt-2">Searches all 30 countries sequentially. You can navigate away — the scan will cancel and your partial results will be saved.</p>
         </form>
     </div>
 
@@ -54,10 +54,13 @@
                 <div id="opp-progress-bar" class="h-2 rounded-full bg-purple-500 transition-all duration-300" style="width: 0%"></div>
             </div>
             <p class="text-xs text-slate-500 mt-2" id="opp-progress-detail">0 / 30 countries scanned</p>
-            <p class="text-xs text-yellow-500/70 mt-1.5 flex items-center gap-1">
+            <p class="text-xs text-slate-500/70 mt-1.5 flex items-center gap-1">
                 <svg class="w-3.5 h-3.5 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 9v2m0 4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z"/></svg>
-                Please stay on this page — navigating away will cancel the scan.
+                You can navigate away — the scan will cancel and partial results will be kept.
             </p>
+            <button type="button" id="opp-cancel-btn" onclick="cancelOpportunityScan()" class="hidden mt-2 text-xs text-red-400 hover:text-red-300 border border-red-500/20 rounded-lg px-3 py-1.5 transition-colors">
+                Cancel Scan
+            </button>
         </div>
     </div>
 
@@ -699,6 +702,19 @@ let lastResultsData = null;
 let lastKeyword = '';
 let lastAppId = null;
 
+// --- Cancellation support ---
+let scanAbortController = null;
+let scanCancelled = false;
+
+function cancelOpportunityScan() {
+    scanCancelled = true;
+    if (scanAbortController) scanAbortController.abort();
+}
+// Expose globally so base.html nav protection can call it
+window.cancelSearch = cancelOpportunityScan;
+
+const COUNTRY_CODES = Object.keys(COUNTRY_NAMES);
+
 document.addEventListener('DOMContentLoaded', function() {
     const form = document.getElementById('opp-form');
     const btn = document.getElementById('opp-btn');
@@ -709,6 +725,21 @@ document.addEventListener('DOMContentLoaded', function() {
     const progressDetail = document.getElementById('opp-progress-detail');
     const selectAll = document.getElementById('opp-select-all');
     const oppApp = document.getElementById('opp-app');
+    const cancelBtn = document.getElementById('opp-cancel-btn');
+
+    // --- Restore results from sessionStorage on page load ---
+    try {
+        const saved = sessionStorage.getItem('opp_results');
+        const savedKw = sessionStorage.getItem('opp_keyword');
+        if (saved && savedKw) {
+            lastResultsData = JSON.parse(saved);
+            lastKeyword = savedKw;
+            lastAppId = sessionStorage.getItem('opp_app_id') || null;
+            results.classList.remove('hidden');
+            document.getElementById('opp-actions').classList.remove('hidden');
+            renderResults({keyword: lastKeyword, results: lastResultsData});
+        }
+    } catch(e) {}
 
     // Restore app selection from localStorage
     try {
@@ -745,9 +776,24 @@ document.addEventListener('DOMContentLoaded', function() {
 
         const appId = document.getElementById('opp-app').value;
 
-        // Show progress, set nav protection
+        // Reset state
+        scanCancelled = false;
+        scanAbortController = null;
+        lastResultsData = [];
+        lastKeyword = keyword;
+        lastAppId = appId || null;
+
+        // Clear sessionStorage for fresh search
+        try {
+            sessionStorage.removeItem('opp_results');
+            sessionStorage.removeItem('opp_keyword');
+            sessionStorage.removeItem('opp_app_id');
+        } catch(e) {}
+
+        // Show progress
         results.classList.add('hidden');
         progress.classList.remove('hidden');
+        cancelBtn.classList.remove('hidden');
         document.getElementById('opp-saved-banner').classList.add('hidden');
         window.searchInProgress = true;
         btn.disabled = true;
@@ -755,62 +801,98 @@ document.addEventListener('DOMContentLoaded', function() {
         const btnOriginal = btn.innerHTML;
         btn.innerHTML = `<svg class="w-4 h-4 animate-spin" fill="none" viewBox="0 0 24 24"><circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle><path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"></path></svg> Scanning...`;
 
-        // Simulate progress
-        let progressPct = 0;
-        const interval = setInterval(() => {
-            if (progressPct < 95) {
-                progressPct += (95 - progressPct) * 0.05;
-                progressBar.style.width = `${progressPct}%`;
-                const scanned = Math.min(30, Math.round(progressPct / 100 * 30));
-                progressDetail.textContent = `~${scanned} / 30 countries scanned`;
-                progressText.textContent = `Scanning "${keyword}" across all countries...`;
-            }
-        }, 1000);
+        progressBar.style.width = '0%';
+        progressDetail.textContent = '0 / 30 countries scanned';
+        progressText.textContent = `Scanning "${keyword}"...`;
 
+        let errorCount = 0;
+
+        for (let i = 0; i < COUNTRY_CODES.length; i++) {
+            if (scanCancelled) break;
+
+            const cc = COUNTRY_CODES[i];
+            const countryName = COUNTRY_NAMES[cc];
+            progressText.textContent = `Scanning ${countryFlag(cc)} ${countryName}...`;
+
+            // Rate-limit: wait 1.5s between calls (skip for the first)
+            if (i > 0) {
+                await new Promise(r => setTimeout(r, 1500));
+                if (scanCancelled) break;
+            }
+
+            try {
+                scanAbortController = new AbortController();
+                const formData = new FormData();
+                formData.append('keyword', keyword);
+                formData.append('country', cc);
+                if (appId) formData.append('app_id', appId);
+                formData.append('csrfmiddlewaretoken', csrfToken);
+
+                const resp = await fetch('{% url "aso:opportunity_search_country" %}', {
+                    method: 'POST',
+                    body: formData,
+                    signal: scanAbortController.signal,
+                });
+
+                if (!resp.ok) {
+                    errorCount++;
+                    continue;
+                }
+
+                const countryResult = await resp.json();
+                lastResultsData.push(countryResult);
+
+                // Save incrementally so partial results survive tab switches
+                try {
+                    sessionStorage.setItem('opp_results', JSON.stringify(lastResultsData));
+                    sessionStorage.setItem('opp_keyword', lastKeyword);
+                    if (lastAppId) sessionStorage.setItem('opp_app_id', lastAppId);
+                } catch(e) {}
+            } catch (err) {
+                if (err.name === 'AbortError') break;
+                errorCount++;
+            }
+
+            // Update progress
+            const done = i + 1;
+            const pct = Math.round((done / COUNTRY_CODES.length) * 100);
+            progressBar.style.width = `${pct}%`;
+            progressDetail.textContent = `${done} / ${COUNTRY_CODES.length} countries scanned`;
+        }
+
+        // Sort results by opportunity score
+        lastResultsData.sort((a, b) => b.opportunity - a.opportunity);
+
+        // Save to sessionStorage
         try {
-            const formData = new FormData();
-            formData.append('keyword', keyword);
-            if (appId) formData.append('app_id', appId);
-            formData.append('csrfmiddlewaretoken', csrfToken);
+            sessionStorage.setItem('opp_results', JSON.stringify(lastResultsData));
+            sessionStorage.setItem('opp_keyword', lastKeyword);
+            if (lastAppId) sessionStorage.setItem('opp_app_id', lastAppId);
+        } catch(e) {}
 
-            const resp = await fetch('{% url "aso:opportunity_search" %}', {
-                method: 'POST',
-                body: formData,
-            });
+        // Show results
+        progress.classList.add('hidden');
+        cancelBtn.classList.add('hidden');
 
-            clearInterval(interval);
-            progressBar.style.width = '100%';
-            progressDetail.textContent = '30 / 30 countries scanned';
-
-            if (!resp.ok) {
-                const err = await resp.json();
-                throw new Error(err.error || 'Search failed');
-            }
-
-            const data = await resp.json();
-
-            lastResultsData = data.results;
-            lastKeyword = data.keyword;
-            lastAppId = data.app_id;
-
-            await new Promise(r => setTimeout(r, 500));
-            progress.classList.add('hidden');
+        if (lastResultsData.length > 0) {
             results.classList.remove('hidden');
             document.getElementById('opp-actions').classList.remove('hidden');
-
-            renderResults(data);
-
-        } catch (error) {
-            clearInterval(interval);
-            progress.classList.add('hidden');
+            renderResults({keyword: lastKeyword, results: lastResultsData});
+        } else {
             results.classList.remove('hidden');
             document.getElementById('opp-actions').classList.add('hidden');
             document.getElementById('opp-best').innerHTML = `
-                <div class="text-red-400 text-sm"><strong>Error:</strong> ${error.message}</div>`;
+                <div class="text-red-400 text-sm"><strong>Error:</strong> ${scanCancelled ? 'Scan cancelled.' : 'No results. All countries failed.'}</div>`;
             document.getElementById('opp-tbody').innerHTML = '';
         }
 
+        if (errorCount > 0 && lastResultsData.length > 0) {
+            document.getElementById('opp-saved-banner').classList.remove('hidden');
+            document.getElementById('opp-saved-text').textContent = `${errorCount} country scan(s) failed — showing ${lastResultsData.length} successful results.`;
+        }
+
         window.searchInProgress = false;
+        scanAbortController = null;
         btn.disabled = false;
         btn.classList.remove('opacity-50', 'cursor-not-allowed');
         btn.innerHTML = btnOriginal;
@@ -943,13 +1025,18 @@ function exportOpportunityCSV() {
     ]);
     let csv = headers.join(',') + '\n';
     csv += rows.map(r => r.join(',')).join('\n');
-    const blob = new Blob([csv], { type: 'text/csv' });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement('a');
-    a.href = url;
-    a.download = 'respectaso-opportunity-' + lastKeyword.replace(/[^a-z0-9]/gi, '-') + '.csv';
-    a.click();
-    URL.revokeObjectURL(url);
+    const filename = 'respectaso-opportunity-' + lastKeyword.replace(/[^a-z0-9]/gi, '-') + '.csv';
+    if (window.pywebview && window.pywebview.api) {
+        window.pywebview.api.save_file(filename, csv);
+    } else {
+        const blob = new Blob([csv], { type: 'text/csv' });
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = filename;
+        a.click();
+        URL.revokeObjectURL(url);
+    }
 }
 </script>
 {% endblock %}

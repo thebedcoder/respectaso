@@ -5,6 +5,8 @@ import re
 import time
 import urllib.request
 
+logger = logging.getLogger(__name__)
+
 from django.conf import settings
 from django.http import HttpResponse, JsonResponse
 from django.utils import timezone
@@ -78,8 +80,23 @@ def dashboard_view(request):
             if selected_app_obj.track_id:
                 show_rank = True
 
+    # --- Filter params (insight, popularity, difficulty) ---
+    insight_filter = request.GET.getlist("insight")
+    pop_min_param = request.GET.get("pop_min", "")
+    diff_max_param = request.GET.get("diff_max", "")
+    search_q = request.GET.get("q", "").strip()
+
+    try:
+        pop_min = int(pop_min_param) if pop_min_param else None
+    except (ValueError, TypeError):
+        pop_min = None
+    try:
+        diff_max = int(diff_max_param) if diff_max_param else None
+    except (ValueError, TypeError):
+        diff_max = None
+
     # Get the latest result ID for each keyword+country pair
-    from django.db.models import Case, IntegerField, Max, Value, When
+    from django.db.models import Case, IntegerField, Max, Q, Value, When
     from django.db.models.functions import Lower
 
     latest_filter = {}
@@ -114,6 +131,44 @@ def dashboard_view(request):
         .filter(id__in=latest_ids)
         .select_related("keyword", "keyword__app")
     )
+
+    # Total unfiltered count (before insight/pop/diff filters)
+    total_unfiltered_count = results_qs.count()
+
+    # Apply keyword text search
+    if search_q:
+        results_qs = results_qs.filter(keyword__keyword__icontains=search_q)
+
+    # Apply popularity / difficulty filters
+    if pop_min is not None:
+        results_qs = results_qs.filter(
+            popularity_score__isnull=False,
+            popularity_score__gte=pop_min,
+        )
+    if diff_max is not None:
+        results_qs = results_qs.filter(
+            difficulty_score__isnull=False,
+            difficulty_score__lte=diff_max,
+        )
+
+    # Apply insight filter — translate labels to ORM Q conditions
+    # These mirror the ranges in SearchResult.targeting_advice
+    INSIGHT_Q = {
+        "Sweet Spot": Q(popularity_score__gte=40, difficulty_score__lte=40),
+        "Good Target": Q(popularity_score__gte=40, difficulty_score__gt=40, difficulty_score__lte=60),
+        "Worth Competing": Q(popularity_score__gte=40, difficulty_score__gt=60),
+        "Hidden Gem": Q(popularity_score__gte=30, popularity_score__lt=40, difficulty_score__lte=40),
+        "Decent Option": Q(popularity_score__gte=30, popularity_score__lt=40, difficulty_score__gt=40, difficulty_score__lte=60),
+        "Low Volume": Q(popularity_score__lt=30, difficulty_score__lte=30) & Q(popularity_score__isnull=False),
+        "Avoid": Q(popularity_score__lt=30, difficulty_score__gt=30) & Q(popularity_score__isnull=False),
+        "Challenging": Q(popularity_score__gte=30, popularity_score__lt=40, difficulty_score__gt=60),
+    }
+    valid_insights = [i for i in insight_filter if i in INSIGHT_Q]
+    if valid_insights:
+        combined = Q()
+        for label in valid_insights:
+            combined |= INSIGHT_Q[label]
+        results_qs = results_qs.filter(combined)
 
     sorted_results = None
 
@@ -228,6 +283,9 @@ def dashboard_view(request):
             result.difficulty_delta = None
             result.rank_delta = None
 
+    # Determine if any filters are active
+    has_filters = bool(valid_insights or pop_min is not None or diff_max is not None or search_q)
+
     return render(
         request,
         "aso/dashboard.html",
@@ -245,10 +303,17 @@ def dashboard_view(request):
             "page": page,
             "total_pages": total_pages,
             "total_count": total_count,
+            "total_unfiltered_count": total_unfiltered_count,
             "has_prev": page > 1,
             "has_next": page < total_pages,
             "current_sort": sort_by,
             "current_dir": sort_dir,
+            # Filter state
+            "selected_insights": valid_insights,
+            "selected_pop_min": pop_min,
+            "selected_diff_max": diff_max,
+            "search_q": search_q,
+            "has_filters": has_filters,
         },
     )
 
@@ -423,6 +488,79 @@ def opportunity_view(request):
     apps = App.objects.all()
     form = OpportunitySearchForm()
     return render(request, "aso/opportunity.html", {"apps": apps, "form": form})
+
+
+@require_POST
+def opportunity_search_country_view(request):
+    """AJAX endpoint: search a keyword in a single country.
+
+    Called once per country by the frontend (30 sequential calls).
+    """
+    keyword = request.POST.get("keyword", "").strip().lower()
+    country_code = request.POST.get("country", "").strip().lower()
+    app_id = request.POST.get("app_id", "")
+
+    valid_codes = {code for code, _ in COUNTRY_CHOICES}
+    if not keyword or country_code not in valid_codes:
+        return JsonResponse({"error": "Missing or invalid keyword/country."}, status=400)
+
+    app = None
+    if app_id:
+        try:
+            app = App.objects.get(id=app_id)
+        except App.DoesNotExist:
+            pass
+
+    itunes_service = ITunesSearchService()
+    difficulty_calc = DifficultyCalculator()
+    popularity_est = PopularityEstimator()
+    download_est = DownloadEstimator()
+
+    competitors = itunes_service.search_apps(keyword, country=country_code, limit=25)
+    difficulty_score, breakdown = difficulty_calc.calculate(
+        competitors, keyword=keyword
+    )
+    popularity = popularity_est.estimate(competitors, keyword)
+
+    download_estimates = download_est.estimate(popularity or 0, country=country_code)
+    breakdown["download_estimates"] = download_estimates
+
+    app_rank = None
+    if app and app.track_id:
+        app_rank = itunes_service.find_app_rank(
+            keyword, app.track_id, country=country_code
+        )
+
+    if difficulty_score <= 15:
+        diff_label = "Very Easy"
+    elif difficulty_score <= 35:
+        diff_label = "Easy"
+    elif difficulty_score <= 55:
+        diff_label = "Moderate"
+    elif difficulty_score <= 75:
+        diff_label = "Hard"
+    elif difficulty_score <= 90:
+        diff_label = "Very Hard"
+    else:
+        diff_label = "Extreme"
+
+    opportunity = round(popularity * (100 - difficulty_score) / 100) if popularity else 0
+    top_competitor = competitors[0]["trackName"] if competitors else "—"
+    top_ratings = competitors[0].get("userRatingCount", 0) if competitors else 0
+
+    return JsonResponse({
+        "country": country_code,
+        "popularity": popularity,
+        "difficulty": difficulty_score,
+        "difficulty_label": diff_label,
+        "difficulty_breakdown": breakdown,
+        "competitors_data": competitors,
+        "opportunity": opportunity,
+        "app_rank": app_rank,
+        "competitor_count": len(competitors),
+        "top_competitor": top_competitor,
+        "top_ratings": top_ratings,
+    })
 
 
 @require_POST
@@ -805,19 +943,80 @@ def keyword_refresh_view(request, keyword_id):
 
 def export_history_csv_view(request):
     """
-    Export all search history as a CSV file.
+    Export search history as a CSV file.
 
-    Supports optional ?app= filter to limit to one app.
+    Supports the same filters as the dashboard: app, country, insight,
+    pop_min, diff_max.  Only the latest result per keyword+country is
+    exported (matching the dashboard table).
     """
     app_id = request.GET.get("app")
     country = request.GET.get("country")
-    results_qs = SearchResult.objects.select_related("keyword", "keyword__app").order_by(
-        "-searched_at"
-    )
+    insight_filter = request.GET.getlist("insight")
+    pop_min_raw = request.GET.get("pop_min")
+    diff_max_raw = request.GET.get("diff_max")
+    search_q = request.GET.get("q", "").strip()
+
+    pop_min = int(pop_min_raw) if pop_min_raw and pop_min_raw.isdigit() else None
+    diff_max = int(diff_max_raw) if diff_max_raw and diff_max_raw.isdigit() else None
+
+    from django.db.models import Max, Q
+
+    # Deduplicate: keep only the latest result per keyword+country
+    latest_filter = {}
     if app_id:
-        results_qs = results_qs.filter(keyword__app_id=app_id)
+        latest_filter["keyword__app_id"] = app_id
     if country:
-        results_qs = results_qs.filter(country=country.lower())
+        latest_filter["country"] = country.lower()
+
+    latest_ids = list(
+        SearchResult.objects
+        .filter(**latest_filter)
+        .values("keyword_id", "country")
+        .annotate(latest_id=Max("id"))
+        .values_list("latest_id", flat=True)
+    )
+
+    results_qs = (
+        SearchResult.objects
+        .filter(id__in=latest_ids)
+        .select_related("keyword", "keyword__app")
+    )
+
+    # Apply keyword text search
+    if search_q:
+        results_qs = results_qs.filter(keyword__keyword__icontains=search_q)
+
+    # Apply popularity / difficulty filters
+    if pop_min is not None:
+        results_qs = results_qs.filter(
+            popularity_score__isnull=False,
+            popularity_score__gte=pop_min,
+        )
+    if diff_max is not None:
+        results_qs = results_qs.filter(
+            difficulty_score__isnull=False,
+            difficulty_score__lte=diff_max,
+        )
+
+    # Apply insight filter (same mapping as dashboard_view)
+    INSIGHT_Q = {
+        "Sweet Spot": Q(popularity_score__gte=40, difficulty_score__lte=40),
+        "Good Target": Q(popularity_score__gte=40, difficulty_score__gt=40, difficulty_score__lte=60),
+        "Worth Competing": Q(popularity_score__gte=40, difficulty_score__gt=60),
+        "Hidden Gem": Q(popularity_score__gte=30, popularity_score__lt=40, difficulty_score__lte=40),
+        "Decent Option": Q(popularity_score__gte=30, popularity_score__lt=40, difficulty_score__gt=40, difficulty_score__lte=60),
+        "Low Volume": Q(popularity_score__lt=30, difficulty_score__lte=30) & Q(popularity_score__isnull=False),
+        "Avoid": Q(popularity_score__lt=30, difficulty_score__gt=30) & Q(popularity_score__isnull=False),
+        "Challenging": Q(popularity_score__gte=30, popularity_score__lt=40, difficulty_score__gt=60),
+    }
+    valid_insights = [i for i in insight_filter if i in INSIGHT_Q]
+    if valid_insights:
+        combined = Q()
+        for label in valid_insights:
+            combined |= INSIGHT_Q[label]
+        results_qs = results_qs.filter(combined)
+
+    results_qs = results_qs.order_by("-searched_at")
 
     response = HttpResponse(content_type="text/csv")
     response["Content-Disposition"] = 'attachment; filename="respectaso-search-history.csv"'
@@ -843,7 +1042,7 @@ def export_history_csv_view(request):
 
     # Respectlytics attribution row
     writer.writerow([])
-    writer.writerow(["Privacy-first mobile analytics — https://respectlytics.com"])
+    writer.writerow(["Privacy-first mobile analytics - https://respectlytics.com"])
 
     return response
 
@@ -928,6 +1127,7 @@ def keywords_bulk_refresh_view(request):
 def version_check_view(request):
     """Check GitHub for a newer release. Returns JSON with update info."""
     current = settings.VERSION
+    is_native = getattr(settings, "IS_NATIVE_APP", False)
     try:
         url = "https://api.github.com/repos/respectlytics/respectaso/releases/latest"
         req = urllib.request.Request(url, headers={"Accept": "application/vnd.github.v3+json"})
@@ -935,20 +1135,29 @@ def version_check_view(request):
             data = json.loads(resp.read().decode())
         latest = data.get("tag_name", "").lstrip("v")
         if not latest:
-            return JsonResponse({"update_available": False, "current": current})
+            return JsonResponse({"update_available": False, "current": current, "is_native": is_native})
         # Simple semver comparison
         current_parts = [int(x) for x in current.split(".")]
         latest_parts = [int(x) for x in latest.split(".")]
         update_available = latest_parts > current_parts
+        # Extract .dmg download URL from release assets
+        download_url = ""
+        for asset in data.get("assets", []):
+            if asset.get("name", "").endswith(".dmg"):
+                download_url = asset.get("browser_download_url", "")
+                break
         return JsonResponse({
             "update_available": update_available,
             "current": current,
             "latest": latest,
             "release_url": data.get("html_url", ""),
+            "release_notes": data.get("body", ""),
+            "download_url": download_url,
+            "is_native": is_native,
         })
-    except Exception:
-        # Network error, GitHub down, etc. — silently fail
-        return JsonResponse({"update_available": False, "current": current})
+    except Exception as e:
+        logger.warning("Update check failed: %s: %s", type(e).__name__, e)
+        return JsonResponse({"update_available": False, "error": type(e).__name__, "current": current, "is_native": is_native})
 
 
 def auto_refresh_status_view(request):

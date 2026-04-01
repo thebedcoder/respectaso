@@ -1,6 +1,6 @@
 {% load static %}
 <!DOCTYPE html>
-<html lang="en">
+<html lang="en" class="text-[14px]">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
@@ -19,6 +19,11 @@
             }
         }
     </script>
+    <link rel="apple-touch-icon" sizes="180x180" href="{% static 'images/apple-touch-icon.png' %}">
+    <link rel="icon" type="image/png" sizes="32x32" href="{% static 'images/favicon-32x32.png' %}">
+    <link rel="icon" type="image/png" sizes="16x16" href="{% static 'images/favicon-16x16.png' %}">
+    <link rel="shortcut icon" href="{% static 'images/favicon.ico' %}">
+    <link rel="manifest" href="{% static 'images/site.webmanifest' %}">
     <style>
         /* Minimal custom CSS — only for things Tailwind CDN can't do */
         @keyframes fade-in {
@@ -34,12 +39,35 @@
     <!-- Respectlytics Banner — persistent, non-dismissible -->
     {% include "aso/partials/banner.html" %}
 
+    <!-- Docker → Native migration banner (only for Docker users) -->
+    {% if not IS_NATIVE_APP %}
+    <div id="docker-migration-banner" class="bg-amber-900/30 border-b border-amber-500/30 px-4 py-2.5">
+        <div class="max-w-[1600px] mx-auto flex items-center justify-between gap-3">
+            <p class="text-xs text-amber-200/90">
+                <span class="font-semibold">RespectASO is now a native Mac app!</span>
+                Download the <code class="bg-amber-900/40 px-1 py-0.5 rounded">.dmg</code> for a faster experience — no Docker required.
+            </p>
+            <div class="flex items-center gap-2 flex-shrink-0">
+                <a href="https://github.com/respectlytics/respectaso/releases/latest"
+                   target="_blank" rel="noopener"
+                   class="text-xs font-medium text-amber-100 bg-amber-600/40 hover:bg-amber-600/60 border border-amber-500/30 rounded-lg px-2.5 py-1 transition-colors whitespace-nowrap">
+                    Download .dmg
+                </a>
+                <a href="{% url 'aso:setup' %}#migrating-from-docker"
+                   class="text-xs text-amber-300/70 hover:text-amber-200 transition-colors whitespace-nowrap">
+                    Migration guide
+                </a>
+            </div>
+        </div>
+    </div>
+    {% endif %}
+
     <!-- Navigation -->
     <nav class="bg-slate-800/80 border-b border-white/10 backdrop-blur-sm sticky top-0 z-40">
         <div class="max-w-[1600px] mx-auto px-4 sm:px-6 lg:px-8">
             <div class="flex items-center justify-between h-12">
                 <a href="{% url 'aso:dashboard' %}" class="flex items-center gap-2 text-white hover:text-purple-300 transition-colors">
-                    <span class="text-lg">🔍</span>
+                    <img src="{% static 'images/respectaso-logo.png' %}" alt="RespectASO" class="h-8 w-8 rounded">
                     <span class="font-bold text-base">RespectASO</span>
                 </a>
                 <div class="flex items-center gap-6">
@@ -304,12 +332,6 @@
     <!-- Global navigation protection while searches are running -->
     <script>
     window.searchInProgress = false;
-    window.addEventListener('beforeunload', function(e) {
-        if (window.searchInProgress) {
-            e.preventDefault();
-            e.returnValue = '';
-        }
-    });
     document.addEventListener('click', function(e) {
         if (!window.searchInProgress) return;
         const link = e.target.closest('a[href]');
@@ -317,8 +339,11 @@
         const href = link.getAttribute('href');
         if (!href || href.startsWith('#') || href.startsWith('javascript:') || link.target === '_blank') return;
         e.preventDefault();
-        showConfirm('A search is currently running. Leaving this page will cancel it.\n\nLeave anyway?', {type: 'alert', title: 'Search in Progress', confirmLabel: 'Leave', confirmStyle: 'danger'}).then(function(ok) {
+        showConfirm('A search is currently running. Leaving will cancel it — any results collected so far will be saved.\n\nLeave anyway?', {type: 'alert', title: 'Search in Progress', confirmLabel: 'Leave', confirmStyle: 'danger'}).then(function(ok) {
             if (ok) {
+                if (typeof window.cancelSearch === 'function') {
+                    window.cancelSearch();
+                }
                 window.searchInProgress = false;
                 window.location.href = href;
             }

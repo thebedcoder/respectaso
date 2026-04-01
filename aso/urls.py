@@ -11,6 +11,7 @@ urlpatterns = [
     path("search/", views.search_view, name="search"),
     path("opportunity/", views.opportunity_view, name="opportunity"),
     path("opportunity/search/", views.opportunity_search_view, name="opportunity_search"),
+    path("opportunity/search-country/", views.opportunity_search_country_view, name="opportunity_search_country"),
     path("opportunity/save/", views.opportunity_save_view, name="opportunity_save"),
     path("export/history.csv", views.export_history_csv_view, name="export_history_csv"),
     path("apps/", views.apps_view, name="apps"),
