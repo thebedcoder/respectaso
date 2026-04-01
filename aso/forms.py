@@ -46,7 +46,6 @@ COUNTRY_CHOICES = [
     ("dk", "🇩🇰 Denmark"),
     ("fi", "🇫🇮 Finland"),
     ("pt", "🇵🇹 Portugal"),
-    ("ru", "🇷🇺 Russia"),
     ("tr", "🇹🇷 Turkey"),
     ("sa", "🇸🇦 Saudi Arabia"),
     ("ae", "🇦🇪 UAE"),
@@ -56,6 +55,22 @@ COUNTRY_CHOICES = [
     ("ph", "🇵🇭 Philippines"),
     ("vn", "🇻🇳 Vietnam"),
     ("tw", "🇹🇼 Taiwan"),
+    ("at", "🇦🇹 Austria"),       # German-language, same keywords as DE but separate storefront
+    ("ch", "🇨🇭 Switzerland"),   # German/French mix, high-value storefront
+    ("ie", "🇮🇪 Ireland"),       # English-language, separate from GB in ASO tools
+    ("nz", "🇳🇿 New Zealand"),   # English-language, completes the anglosphere
+    ("pl", "🇵🇱 Poland"),        # Large EU market, Polish-language keywords matter
+    ("cz", "🇨🇿 Czechia"),       # Solid Central European storefront
+    ("hu", "🇭🇺 Hungary"),       # Same reasoning
+    ("ro", "🇷🇴 Romania"),       # Largest untapped EU market in your list
+    ("ar", "🇦🇷 Argentina"),     # Second biggest LATAM after Brazil, Spanish keywords
+    ("cl", "🇨🇱 Chile"),         # High iOS penetration for LATAM
+    ("co", "🇨🇴 Colombia"),      # Third biggest Spanish LATAM market
+    ("il", "🇮🇱 Israel"),        # High iOS adoption, Hebrew + English keywords
+    ("za", "🇿🇦 South Africa"),  # Only significant English-language African storefront
+    ("my", "🇲🇾 Malaysia"),      # Strong English + Malay, high iOS share for SEA
+    ("hk", "🇭🇰 Hong Kong"),     # Cantonese/English, separate from CN entirely
+    ("ua", "🇺🇦 Ukraine"),  # Large Eastern European storefront, Ukrainian
 ]
 
 
